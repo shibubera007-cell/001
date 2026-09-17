@@ -639,7 +639,7 @@
     }
     .sync-option:hover { border-color: #cbd5e0; }
     .sync-option.selected { border-color: #667eea; background: #edf2ff; }
-    .sync-option input[type="radio"] { margin: 0; }
+    .sync-option input[type="radio"], .sync-option input[type="checkbox"] { margin: 0; }
     .sync-option .opt-title { font-weight: 600; font-size: 14px; }
     .sync-option .opt-desc { font-size: 12px; color: #666; margin-top: 2px; }
     .sync-preview {
@@ -661,9 +661,6 @@
         padding: 12px 15px; border-radius: 8px;
         margin-bottom: 15px; font-size: 13px; color: #2a4365;
         line-height: 1.6;
-    }
-    .cloud-info.warn {
-        background: #fffaf0; border-left-color: #ed8936; color: #7b341e;
     }
     code.inline {
         background: #edf2f7; padding: 2px 6px; border-radius: 4px;
@@ -1197,7 +1194,7 @@
                 <div class="form-group">
                     <label>About</label>
                     <p style="color: #666; line-height: 1.7;">
-                        <strong>Daily Consumables Management System v3.0</strong><br>
+                        <strong>Daily Consumables Management System v3.1</strong><br>
                         Developed &amp; Created by <span style="font-family:'Great Vibes', cursive; font-size: 22px; color:#4c51bf;">Shibu</span><br>
                         Role-based access • Cloud synchronisation • Critical stock alerts<br>
                         All data is stored locally in your browser and optionally synced to your own Firebase database.
@@ -1241,11 +1238,13 @@
 <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <script>
 /* =====================================================================
-   DAILY CONSUMABLES MANAGEMENT SYSTEM v3.0
+   DAILY CONSUMABLES MANAGEMENT SYSTEM v3.1
    Role based access + Firebase cloud sync
+   Self-healing user store (fixes stale localStorage from older builds)
    ===================================================================== */
 
-/* ===================== USERS & SESSION ===================== */
+/* ===================== USERS (SCHEMA-VERSIONED) ===================== */
+const USERS_SCHEMA_VERSION = 'v3.1';      // bump this to force a reset of the user store
 const DEFAULT_ADMIN = {
     id: 1,
     userId: 'admin',
@@ -1255,26 +1254,63 @@ const DEFAULT_ADMIN = {
     active: true
 };
 
-let users = JSON.parse(localStorage.getItem('users')) || null;
-if (!Array.isArray(users) || users.length === 0) {
-    users = [ { ...DEFAULT_ADMIN } ];
-    localStorage.setItem('users', JSON.stringify(users));
+(function initUserStore() {
+    const storedVersion = localStorage.getItem('usersSchemaVersion');
+
+    // Migration / self-heal: if version differs from what we expect,
+    // wipe any stale user data (from the old single-password build or
+    // an earlier users schema) and start fresh with the default admin.
+    if (storedVersion !== USERS_SCHEMA_VERSION) {
+        localStorage.removeItem('users');
+        localStorage.removeItem('app_password');    // legacy key from v2.x
+        localStorage.setItem('usersSchemaVersion', USERS_SCHEMA_VERSION);
+    }
+})();
+
+let users;
+try {
+    users = JSON.parse(localStorage.getItem('users'));
+} catch (e) {
+    users = null;
 }
+
+// Validate the shape of every stored user; anything malformed is discarded.
+function isValidUser(u) {
+    return u && typeof u === 'object'
+        && typeof u.userId === 'string' && u.userId.trim()
+        && typeof u.password === 'string' && u.password.length > 0
+        && (u.role === 'admin' || u.role === 'user');
+}
+
+if (!Array.isArray(users)) {
+    users = [];
+} else {
+    users = users.filter(isValidUser);
+}
+
+// Always guarantee at least one admin exists.
 if (!users.some(u => u.role === 'admin')) {
-    users.push({ ...DEFAULT_ADMIN });
-    localStorage.setItem('users', JSON.stringify(users));
+    // Re-use the reserved id 1 if it's free, otherwise take a fresh timestamp.
+    const idTaken = users.some(u => u.id === 1);
+    users.unshift({ ...DEFAULT_ADMIN, id: idTaken ? Date.now() : 1 });
 }
+
+// First-run seed: if the store was empty after validation, insert the default admin.
+if (users.length === 0) {
+    users.push({ ...DEFAULT_ADMIN });
+}
+
+localStorage.setItem('users', JSON.stringify(users));
 
 let currentUser = null;
-
 function isAdmin() { return !!(currentUser && currentUser.role === 'admin'); }
 
 function handleLogin() {
-    const uidEl = document.getElementById('loginUserId');
-    const pwdEl = document.getElementById('loginPassword');
-    const error = document.getElementById('loginError');
-    const uid = uidEl.value.trim();
-    const pwd = pwdEl.value;
+    const uidEl  = document.getElementById('loginUserId');
+    const pwdEl  = document.getElementById('loginPassword');
+    const error  = document.getElementById('loginError');
+    const uid    = uidEl.value.trim();
+    const pwd    = pwdEl.value;
 
     if (!uid || !pwd) {
         error.textContent = 'Please enter both User ID and password.';
@@ -1282,7 +1318,9 @@ function handleLogin() {
         return;
     }
 
-    const user = users.find(u => String(u.userId).toLowerCase() === uid.toLowerCase() && u.password === pwd);
+    const user = users.find(u =>
+        String(u.userId).toLowerCase() === uid.toLowerCase() && u.password === pwd
+    );
 
     if (!user) {
         error.textContent = 'Invalid User ID or password.';
@@ -1319,9 +1357,7 @@ function applyRoleUI() {
     document.getElementById('userChipName').textContent = currentUser.name || currentUser.userId;
     const roleTag = document.getElementById('userChipRole');
     roleTag.textContent = isAdmin() ? 'ADMIN' : 'VIEW ONLY';
-    roleTag.style.background = isAdmin() ? 'rgba(255,255,255,0.28)' : 'rgba(255,255,255,0.20)';
 
-    // Welcome text
     const h = new Date().getHours();
     const greet = h < 12 ? 'Good morning' : h < 17 ? 'Good afternoon' : 'Good evening';
     document.getElementById('heroGreeting').textContent = greet + ',';
@@ -1331,10 +1367,9 @@ function applyRoleUI() {
         ? 'You have full control over inventory, receipts and issues.'
         : 'You have read-only access to live inventory data.';
 
-    // Admin hint banner in dashboard
     const banner = document.getElementById('adminHintBanner');
     if (banner) {
-        if (!firebaseConfig || !firebaseConfig.databaseURL) {
+        if (isAdmin() && (!firebaseConfig || !firebaseConfig.databaseURL)) {
             banner.style.display = 'flex';
             banner.innerHTML = '☁️ Cloud sync is not configured yet. Go to <b>Settings → Cloud Database Sync</b> to connect your Firebase database.';
         } else {
@@ -1349,10 +1384,9 @@ function logout() {
     sessionStorage.removeItem('currentUserId');
     currentUser = null;
     if (cloudTimer) { clearInterval(cloudTimer); cloudTimer = null; }
-    if (pushTimer) { clearTimeout(pushTimer); pushTimer = null; }
+    if (pushTimer)  { clearTimeout(pushTimer);  pushTimer  = null; }
     document.getElementById('app').style.display = 'none';
-    const overlay = document.getElementById('loginOverlay');
-    overlay.classList.remove('hidden');
+    document.getElementById('loginOverlay').classList.remove('hidden');
     document.getElementById('loginUserId').value = '';
     document.getElementById('loginPassword').value = '';
     document.getElementById('loginError').style.display = 'none';
@@ -1427,17 +1461,17 @@ function navigateTo(section) {
     document.querySelectorAll('.section').forEach(s => s.classList.remove('active'));
     document.getElementById(section).classList.add('active');
 
-    if (section === 'dashboard') updateDashboard();
+    if (section === 'dashboard')  updateDashboard();
     if (section === 'management') renderMaterialsTable();
-    if (section === 'receipt') renderReceiptsTable();
-    if (section === 'issue') renderIssuesTable();
+    if (section === 'receipt')    renderReceiptsTable();
+    if (section === 'issue')      renderIssuesTable();
     if (section === 'settings') {
         updateManualSelect();
         renderUsersTable();
         fillCloudForm();
-        document.getElementById('settingsPassword').value = settings.settingsPassword;
-        document.getElementById('reversalPassword').value = settings.reversalPassword;
-        document.getElementById('deletePassword').value = settings.deletePassword;
+        document.getElementById('settingsPassword').value = '';
+        document.getElementById('reversalPassword').value = '';
+        document.getElementById('deletePassword').value = '';
     }
 }
 
@@ -2120,18 +2154,21 @@ function updateSettingsPassword() {
     const p = document.getElementById('settingsPassword').value;
     if (p.length < 4) { showToast('Min 4 chars', 'error'); return; }
     settings.settingsPassword = p; saveToLocalStorage();
+    document.getElementById('settingsPassword').value = '';
     showToast('Settings password updated', 'success');
 }
 function updateReversalPassword() {
     const p = document.getElementById('reversalPassword').value;
     if (p.length < 4) { showToast('Min 4 chars', 'error'); return; }
     settings.reversalPassword = p; saveToLocalStorage();
+    document.getElementById('reversalPassword').value = '';
     showToast('Reversal password updated', 'success');
 }
 function updateDeletePassword() {
     const p = document.getElementById('deletePassword').value;
     if (p.length < 6) { showToast('Min 6 chars', 'error'); return; }
     settings.deletePassword = p; saveToLocalStorage();
+    document.getElementById('deletePassword').value = '';
     showToast('Delete password updated', 'success');
 }
 
@@ -2187,7 +2224,14 @@ function importJSONData(data) {
         if (Array.isArray(data.materials)) { materials = data.materials; imported = true; }
         if (Array.isArray(data.receipts))  { receipts  = data.receipts;  imported = true; }
         if (Array.isArray(data.issues))    { issues    = data.issues;    imported = true; }
-        if (Array.isArray(data.users) && data.users.length) { users = data.users; imported = true; }
+        if (Array.isArray(data.users) && data.users.length) {
+            const cleaned = data.users.filter(isValidUser);
+            if (cleaned.length && cleaned.some(u => u.role === 'admin')) {
+                users = cleaned;
+                localStorage.setItem('usersSchemaVersion', USERS_SCHEMA_VERSION);
+                imported = true;
+            }
+        }
         if (data.settings) { settings = { ...settings, ...data.settings }; imported = true; }
     } else if (Array.isArray(data)) {
         if (data.length === 0) { showToast('Empty array — nothing to import', 'error'); return; }
@@ -2201,7 +2245,7 @@ function importJSONData(data) {
     if (!imported) { showToast('No valid data found in file', 'error'); return; }
     if (!settings.settingsPassword) settings.settingsPassword = 'admin123';
     if (!settings.reversalPassword) settings.reversalPassword = 'admin123';
-    if (!settings.deletePassword)   settings.deletePassword = 'admin123';
+    if (!settings.deletePassword)   settings.deletePassword   = 'admin123';
 
     saveToLocalStorage(); loadAllData();
     showToast('Data uploaded successfully', 'success');
@@ -2324,18 +2368,16 @@ function parseFirebaseConfigText(text) {
     if (!text || !text.trim()) return null;
     const raw = text.trim();
 
-    // 1) Try direct JSON
     try { return JSON.parse(raw); } catch (e) {}
 
-    // 2) Extract the object literal and normalise keys/quotes
     const start = raw.indexOf('{');
     const end = raw.lastIndexOf('}');
     if (start === -1 || end === -1 || end <= start) return null;
 
     let body = raw.slice(start, end + 1);
-    body = body.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');   // quote keys
-    body = body.replace(/'/g, '"');                                       // single → double quotes
-    body = body.replace(/,(\s*[}\]])/g, '$1');                            // trailing commas
+    body = body.replace(/([{,]\s*)([A-Za-z_$][\w$]*)\s*:/g, '$1"$2":');
+    body = body.replace(/'/g, '"');
+    body = body.replace(/,(\s*[}\]])/g, '$1');
     try { return JSON.parse(body); } catch (e) { return null; }
 }
 
@@ -2382,9 +2424,7 @@ function fillCloudForm() {
     if (!isAdmin()) return;
     const ta = document.getElementById('firebaseConfigInput');
     if (!ta) return;
-    if (firebaseConfig) {
-        ta.value = JSON.stringify(firebaseConfig, null, 2);
-    }
+    if (firebaseConfig) ta.value = JSON.stringify(firebaseConfig, null, 2);
     const keyEl = document.getElementById('cloudDataKey');
     if (keyEl) keyEl.value = cloudSettings.dataKey || 'dailyConsumables';
     const tokEl = document.getElementById('cloudAuthToken');
@@ -2481,7 +2521,10 @@ async function pullFromCloud(quiet) {
         if (Array.isArray(data.materials)) materials = data.materials;
         if (Array.isArray(data.receipts))  receipts  = data.receipts;
         if (Array.isArray(data.issues))    issues    = data.issues;
-        if (Array.isArray(data.users) && data.users.length) users = data.users;
+        if (Array.isArray(data.users) && data.users.length) {
+            const cleaned = data.users.filter(isValidUser);
+            if (cleaned.length && cleaned.some(u => u.role === 'admin')) users = cleaned;
+        }
 
         const after = JSON.stringify({ m: materials, r: receipts, i: issues, u: users });
 
@@ -2529,14 +2572,8 @@ function initCloud() {
     (async () => {
         const ok = await testCloudConnection(true);
         if (!ok) return;
-
-        // First pull so this device has the latest shared data
         await pullFromCloud(true);
-
-        // If admin and local has data that was never pushed, push it up
-        if (isAdmin() && cloudDirty) {
-            await pushToCloud(true);
-        }
+        if (isAdmin() && cloudDirty) await pushToCloud(true);
     })();
 
     cloudTimer = setInterval(cloudHeartbeat, 30000);
